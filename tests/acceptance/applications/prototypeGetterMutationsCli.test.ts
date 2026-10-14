@@ -10,6 +10,18 @@ cliTest.for(["CLI", "stdio MCP"] as const)(
   async (surface, { cli }) => {
     const root = await createTestTempDirectory("rea-prototype-getter-");
     const cases = [
+      [
+        "actualReceiver",
+        "const box={__proto__:proto,s:shared};box.v.x=2;",
+        "unknown",
+        "{s:{x:1},get v(){return this.s}}",
+      ],
+      [
+        "ownerIsNotReceiver",
+        "const box={__proto__:proto,s:{x:1}};box.v.x=2;",
+        "literal",
+        "{s:shared,get v(){return this.s}}",
+      ],
       ["direct", "const box={__proto__:proto};box.v.x=2;", "unknown"],
       [
         "saved",
@@ -20,12 +32,12 @@ cliTest.for(["CLI", "stdio MCP"] as const)(
       ["shadowed", "const box={__proto__:proto,v:{x:1}};box.v.x=2;", "literal"],
       [
         "spread",
-        "const source={__proto__:proto};const box={...source};box.v.x=2;",
+        "const source={__proto__:proto};const box={...source};if(box.v)box.v.x=2;",
         "literal",
       ],
       [
         "rest",
-        "const source={__proto__:proto};const {...box}=source;box.v.x=2;",
+        "const source={__proto__:proto};const {...box}=source;if(box.v)box.v.x=2;",
         "literal",
       ],
     ] as const;
@@ -33,8 +45,13 @@ cliTest.for(["CLI", "stdio MCP"] as const)(
       join(root, "app.mjs"),
       cases
         .map(
-          ([name, body]) => `export function ${name}(){
-      const shared={x:1};const proto={get v(){return shared}};
+          ([
+            name,
+            body,
+            ,
+            prototype = "{get v(){return shared}}",
+          ]) => `export function ${name}(){
+      const shared={x:1};const proto=${prototype};
       ${body}
       return shared.x;
     }`,

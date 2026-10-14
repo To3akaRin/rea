@@ -12,12 +12,8 @@ const resultValue = (body: string) =>
     "result",
   ).returnSites[0]?.value;
 
-describe("object-literal prototype getter writes (#2655)", () => {
+describe("object-literal prototype getter receiver context", () => {
   it.each([
-    [
-      "direct getter",
-      "const proto={get v(){return shared}};const box={__proto__:proto};box.v.x=2;",
-    ],
     [
       "saved getter result",
       "const proto={get v(){return shared}};const box={__proto__:proto};const saved=box.v;saved.x=2;",
@@ -72,10 +68,6 @@ describe("prototype getter shadowing and own copy boundaries", () => {
     [
       "read without write",
       "const proto={get v(){return shared}};const box={__proto__:proto};const saved=box.v;",
-    ],
-    [
-      "own data property",
-      "const proto={get v(){return shared}};const box={__proto__:proto,v:{x:1}};box.v.x=2;",
     ],
     [
       "own setter-only property",
