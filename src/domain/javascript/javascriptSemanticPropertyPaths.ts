@@ -1,7 +1,12 @@
+import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
+
 /** Slots retained by a shallow copy after exclusions or an array prefix. */
 export interface JavaScriptSemanticPropertySelection {
   readonly excludedKeys: readonly string[];
   readonly startIndex?: number;
+  /** Object spread/rest reads own slots, even when selecting one exact name. */
+  readonly ownOnly?: true;
+  readonly exactKey?: string;
 }
 
 /** Internal mutation path, including selected children of a shallow copy. */
@@ -30,10 +35,38 @@ export const semanticPropertyPathKeyMatches = (
 ): boolean => {
   if (key === null) return true;
   if (typeof key !== "object") return String(key) === name;
+  if (key.exactKey !== undefined && key.exactKey !== name) return false;
   if (key.excludedKeys.includes(name)) return false;
   if (key.startIndex === undefined) return true;
   const index = semanticArrayIndex(name);
   return index !== null && index >= key.startIndex;
+};
+
+export const semanticExactPropertyPathKey = (
+  key: JavaScriptSemanticPropertyPath[number] | undefined,
+): string | null =>
+  key == null
+    ? null
+    : typeof key === "object"
+      ? (key.exactKey ?? null)
+      : String(key);
+
+export const semanticOwnPropertySelection = (
+  key: JavaScriptSemanticPropertyPath[number] | undefined,
+  excludedKeys: readonly string[] = [],
+): JavaScriptSemanticPropertySelection => {
+  const exactKey = semanticExactPropertyPathKey(key);
+  return {
+    ...(key !== null && typeof key === "object" ? key : {}),
+    ...(exactKey === null ? {} : { exactKey }),
+    ownOnly: true,
+    excludedKeys: [
+      ...new Set([
+        ...(key !== null && typeof key === "object" ? key.excludedKeys : []),
+        ...excludedKeys,
+      ]),
+    ].sort(compareUnicodeCodePoints),
+  };
 };
 
 interface PropertyPathCoverageNode {
@@ -116,12 +149,21 @@ const keyCovers = (
 ): boolean => {
   if (covering === null) return true;
   if (key === null) return false;
+  if (
+    typeof covering === "object" &&
+    covering.ownOnly &&
+    !(typeof key === "object" && key.ownOnly)
+  )
+    return false;
   if (typeof key !== "object")
     return typeof covering === "object"
       ? semanticPropertyPathKeyMatches(covering, String(key))
       : String(covering) === String(key);
+  if (key.exactKey !== undefined)
+    return semanticPropertyPathKeyMatches(covering, key.exactKey);
   return (
     typeof covering === "object" &&
+    covering.exactKey === undefined &&
     covering.excludedKeys.every((name) => key.excludedKeys.includes(name)) &&
     (covering.startIndex === undefined ||
       (key.startIndex !== undefined && covering.startIndex <= key.startIndex))

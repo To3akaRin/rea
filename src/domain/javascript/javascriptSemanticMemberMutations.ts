@@ -38,6 +38,8 @@ import {
   semanticArrayIndex,
   SemanticPropertyPathCoverage,
   semanticPropertyPathKeyMatches,
+  semanticOwnPropertySelection,
+  semanticExactPropertyPathKey,
   type JavaScriptSemanticPropertyPath,
 } from "./javascriptSemanticPropertyPaths.js";
 import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
@@ -320,7 +322,11 @@ export function* collectSemanticMemberMutationsSteps(
             effect,
             path.map((key, index) =>
               index === selectorIndex
-                ? { startIndex: selector.startIndex }
+                ? {
+                    startIndex: selector.startIndex,
+                    exactKey: selector.exactKey,
+                    ownOnly: selector.ownOnly,
+                  }
                 : key,
             ),
             mutation?.start,
@@ -1168,9 +1174,10 @@ const arrayReferencedValues = (
 ): readonly ReferencedValue[] => {
   const [key, ...remaining] = path;
   const selected = key ?? null;
+  const selectedName = semanticExactPropertyPathKey(selected);
   const selectedIndex =
-    typeof selected === "object" ? null : semanticArrayIndex(selected);
-  if (typeof selected !== "object" && selectedIndex === null) return [];
+    selectedName === null ? null : semanticArrayIndex(selectedName);
+  if (selectedName !== null && selectedIndex === null) return [];
   const references: ReferencedValue[] = [];
   let minimumIndex = 0;
   let uncertainIndex = false;
@@ -1225,8 +1232,21 @@ const copiedReferencePath = (
   const copiedPath = [...initializer.projection.slice(offset + 1), ...path];
   if (effect === "write" && copiedPath.length < 2) return null;
   let [key, ...remaining] = copiedPath;
+  const requested = semanticExactPropertyPathKey(key);
+  if (requested !== null && !semanticPropertyPathKeyMatches(key!, requested))
+    return null;
   if (initializer.copyKind === "array-rest") {
     const startIndex = initializer.copyStartIndex ?? 0;
+    const exact = semanticExactPropertyPathKey(key);
+    if (exact !== null) {
+      const index = semanticArrayIndex(exact);
+      if (index === null) return null;
+      return [
+        ...initializer.projection.slice(0, offset),
+        index + startIndex,
+        ...remaining,
+      ];
+    }
     if (key === undefined || key === null)
       key = { excludedKeys: [], startIndex };
     else if (typeof key === "object")
@@ -1237,22 +1257,18 @@ const copiedReferencePath = (
         }),
         startIndex: (key.startIndex ?? 0) + startIndex,
       };
-    else {
-      const index = semanticArrayIndex(key);
-      if (index === null) return null;
-      key = index + startIndex;
-    }
   } else {
     const excludedKeys = initializer.copyExcludedKeys ?? [];
-    if (key === undefined || key === null) key = { excludedKeys };
-    else if (typeof key === "object")
-      key = {
-        ...key,
-        excludedKeys: [...new Set([...key.excludedKeys, ...excludedKeys])].sort(
-          compareUnicodeCodePoints,
-        ),
-      };
-    else if (excludedKeys.includes(String(key))) return null;
+    if (
+      key != null &&
+      typeof key !== "object" &&
+      excludedKeys.includes(String(key))
+    )
+      return null;
+    key = semanticOwnPropertySelection(key, excludedKeys);
+    const exact = semanticExactPropertyPathKey(key);
+    if (exact !== null && !semanticPropertyPathKeyMatches(key, exact))
+      return null;
   }
   return [...initializer.projection.slice(0, offset), key, ...remaining];
 };

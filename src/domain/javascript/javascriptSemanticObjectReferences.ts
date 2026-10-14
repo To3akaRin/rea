@@ -6,12 +6,17 @@ import {
 import { semanticCallableResultExpressions } from "./javascriptSemanticCallableResults.js";
 import { semanticReadInitializers } from "./javascriptSemanticMutationInitializers.js";
 import { semanticReferenceSourcesInactive } from "./javascriptSemanticReferenceSources.js";
+import { evaluateSemanticExpression } from "./javascriptSemanticValues.js";
+import { semanticContainer } from "./javascriptSemanticSlots.js";
 import {
   semanticStaticPropertyKey,
+  isObjectLiteralPrototypeSetter,
   unwrapJavaScriptExpression,
 } from "./javascriptAstValues.js";
 import {
   semanticPropertyPathKeyMatches,
+  semanticExactPropertyPathKey,
+  semanticOwnPropertySelection,
   type JavaScriptSemanticPropertyPath as PropertyPath,
 } from "./javascriptSemanticPropertyPaths.js";
 import { compareUnicodeCodePoints } from "../unicodeCodePointOrder.js";
@@ -234,8 +239,8 @@ export const semanticClassPropertyReferences = (
   const root = lookup.owner;
   const receiver = lookup.receiver ?? root;
   const [key, ...path] = selection;
-  const propertyName =
-    key == null || typeof key === "object" ? null : String(key);
+  const propertyName = semanticExactPropertyPathKey(key);
+  const ownOnly = key !== null && typeof key === "object" && key.ownOnly;
   const pending: (t.ClassDeclaration | t.ClassExpression)[] = [root];
   const seen = new Set<t.Node>();
   const possibleResults: JavaScriptSemanticObjectReference[] = [];
@@ -252,7 +257,7 @@ export const semanticClassPropertyReferences = (
     );
     possibleResults.push(...fields.references);
     instanceFields = fields.definiteNames;
-    if (propertyName !== null && instanceFields.has(propertyName))
+    if (ownOnly || (propertyName !== null && instanceFields.has(propertyName)))
       return possibleResults;
   }
   for (let cursor = 0; cursor < pending.length; cursor++) {
@@ -283,6 +288,7 @@ export const semanticClassPropertyReferences = (
     // An exact own descriptor suppresses inherited lookup. Dynamic computed
     // descriptors may or may not match, so retain possible superclass results.
     if (
+      !ownOnly &&
       descriptors.inherits &&
       klass.superClass !== null &&
       klass.superClass !== undefined
@@ -739,11 +745,15 @@ const getterResultReferences = (
   return references;
 };
 
-export const semanticObjectPropertyReferences = (
+const ownObjectPropertyReferences = (
   node: t.ObjectExpression,
   path: PropertyPath,
   state: JavaScriptSemanticAnalysisState,
-): readonly JavaScriptSemanticObjectReference[] => {
+  receiver: t.ObjectExpression,
+): {
+  references: JavaScriptSemanticObjectReference[];
+  names: ReadonlySet<string>;
+} => {
   const [key, ...remaining] = path;
   const references: JavaScriptSemanticObjectReference[] = [];
   const overwritten = new Set<string>();
@@ -752,35 +762,43 @@ export const semanticObjectPropertyReferences = (
   const getterNames = new Set<string>();
   const setterNames = new Set<string>();
   for (const property of [...node.properties].reverse()) {
+    if (
+      key !== null &&
+      typeof key === "object" &&
+      key.ownOnly &&
+      isObjectLiteralPrototypeSetter(property)
+    )
+      continue;
     if (t.isSpreadElement(property)) {
       const selected = key ?? null;
-      if (typeof selected !== "object" && overwritten.has(String(selected)))
-        continue;
+      const exact = semanticExactPropertyPathKey(selected);
+      if (exact !== null && overwritten.has(exact)) continue;
       references.push({
         node: property.argument,
         path: [
-          typeof selected === "object"
-            ? {
-                ...selected,
-                excludedKeys: [
-                  ...new Set([
-                    ...(selected?.excludedKeys ?? []),
-                    ...overwritten,
-                  ]),
-                ].sort(compareUnicodeCodePoints),
-              }
-            : selected,
+          semanticOwnPropertySelection(selected, [...overwritten]),
           ...remaining,
         ],
       });
+      const spread =
+        exact === null
+          ? undefined
+          : evaluateSemanticExpression(
+              property.argument,
+              state,
+              property.argument,
+            );
+      // General property reads include array length; only enumerable slots are copied.
       if (
-        selected !== null &&
-        typeof selected !== "object" &&
-        t.isObjectExpression(property.argument) &&
-        objectExpressionDefinesKey(property.argument, String(selected))
+        exact !== null &&
+        spread !== undefined &&
+        (spread.status === "object" || spread.status === "array") &&
+        semanticContainer(spread).slots.some(
+          (slot) => slot.name === exact && slot.presence === "present",
+        )
       ) {
-        overwritten.add(String(selected));
-        dataOverwritten.add(String(selected));
+        overwritten.add(exact);
+        dataOverwritten.add(exact);
       }
       continue;
     }
@@ -799,7 +817,7 @@ export const semanticObjectPropertyReferences = (
       if (t.isObjectMethod(property) && property.kind === "get") {
         references.push(
           ...getterResultReferences(
-            { getter: property, owner: node },
+            { getter: property, owner: node, receiver },
             remaining,
             state,
           ),
@@ -823,50 +841,111 @@ export const semanticObjectPropertyReferences = (
         setterNames.add(name);
         accessorNames.add(name);
         overwritten.add(name);
-      } else if (
-        !(
-          t.isObjectProperty(property) &&
-          !property.computed &&
-          !property.shorthand &&
-          name === "__proto__"
-        )
-      ) {
+      } else if (!isObjectLiteralPrototypeSetter(property)) {
         overwritten.add(name);
         dataOverwritten.add(name);
       }
     }
   }
+  return { references, names: overwritten };
+};
+
+/** Preserve an inherited getter's receiver while walking only local literal prototypes. */
+export const semanticObjectPropertyReferences = (
+  root: t.ObjectExpression,
+  path: PropertyPath,
+  state: JavaScriptSemanticAnalysisState,
+): readonly JavaScriptSemanticObjectReference[] => {
+  const pending = [{ node: root, path }];
+  const seen = new Map<t.ObjectExpression, readonly string[]>();
+  const references: JavaScriptSemanticObjectReference[] = [];
+  for (let cursor = 0; cursor < pending.length; cursor++) {
+    const current = pending[cursor];
+    if (current === undefined) break;
+    const [requested, ...remaining] = current.path;
+    const exclusions =
+      requested !== null && typeof requested === "object"
+        ? requested.excludedKeys
+        : [];
+    const previous = seen.get(current.node);
+    // Different routes hide different keys. Intersect their exclusions to retain
+    // the union of visible members without enumerating every inheritance route.
+    const common =
+      previous === undefined
+        ? exclusions
+        : previous.filter((name) => exclusions.includes(name));
+    if (previous !== undefined && common.length === previous.length) continue;
+    seen.set(current.node, common);
+    const key =
+      requested !== null && typeof requested === "object"
+        ? { ...requested, excludedKeys: common }
+        : requested;
+    const own = ownObjectPropertyReferences(
+      current.node,
+      [key ?? null, ...remaining],
+      state,
+      root,
+    );
+    for (const reference of own.references) references.push(reference);
+    if (key !== null && typeof key === "object" && key.ownOnly) continue;
+    const exact = semanticExactPropertyPathKey(key);
+    if (exact !== null && own.names.has(exact)) continue;
+    const inherited =
+      exact === null
+        ? {
+            ...(key !== null && typeof key === "object" ? key : {}),
+            excludedKeys: [
+              ...new Set([
+                ...(key !== null && typeof key === "object"
+                  ? key.excludedKeys
+                  : []),
+                ...own.names,
+              ]),
+            ].sort(compareUnicodeCodePoints),
+          }
+        : key!;
+    for (const property of current.node.properties)
+      if (
+        t.isObjectProperty(property) &&
+        isObjectLiteralPrototypeSetter(property)
+      )
+        for (const node of objectPrototypeCandidates(property.value, state))
+          pending.push({ node, path: [inherited, ...remaining] });
+  }
   return references;
 };
 
-const objectExpressionDefinesKey = (
-  root: t.ObjectExpression,
-  key: string,
-): boolean => {
-  const pending: t.ObjectExpression[] = [root];
-  const seen = new Set<t.ObjectExpression>();
+const objectPrototypeCandidates = (
+  root: t.Node,
+  state: JavaScriptSemanticAnalysisState,
+): readonly t.ObjectExpression[] => {
+  const pending = [root];
+  const seen = new Set<t.Node>();
+  const objects: t.ObjectExpression[] = [];
   for (let cursor = 0; cursor < pending.length; cursor++) {
-    const object = pending[cursor];
-    if (object === undefined || seen.has(object)) continue;
-    seen.add(object);
-    for (const property of object.properties) {
-      if (t.isSpreadElement(property)) {
-        if (t.isObjectExpression(property.argument))
-          pending.push(property.argument);
-        continue;
-      }
-      const name = semanticStaticPropertyKey(property.key, property.computed);
-      if (
-        name === key &&
-        !(
-          t.isObjectProperty(property) &&
-          !property.computed &&
-          !property.shorthand &&
-          name === "__proto__"
-        )
-      )
-        return true;
+    const input = pending[cursor];
+    if (input === undefined) break;
+    const node = unwrapJavaScriptExpression(input).node;
+    if (seen.has(node)) continue;
+    seen.add(node);
+    if (t.isObjectExpression(node)) objects.push(node);
+    else if (t.isIdentifier(node)) {
+      const binding = resolveSemanticBindingState(state, node, node.name);
+      if (binding === undefined) continue;
+      const origins = semanticReadInitializers(
+        binding,
+        node,
+        state.parentsByNode,
+      );
+      for (const initializer of origins.initializers)
+        if (initializer.projection.length === 0) pending.push(initializer.node);
+    } else if (t.isConditionalExpression(node))
+      pending.push(node.consequent, node.alternate);
+    else if (t.isLogicalExpression(node)) pending.push(node.left, node.right);
+    else if (t.isSequenceExpression(node)) {
+      const last = node.expressions.at(-1);
+      if (last !== undefined) pending.push(last);
     }
   }
-  return false;
+  return objects;
 };

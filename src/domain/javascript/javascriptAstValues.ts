@@ -1,6 +1,13 @@
 import * as t from "@babel/types";
 import type { JavaScriptSemanticPrimitive } from "./javascriptSemanticValueTypes.js";
 
+/** Only the non-computed, non-shorthand colon form sets a literal's prototype. */
+export const isObjectLiteralPrototypeSetter = (node: t.Node): boolean =>
+  t.isObjectProperty(node) &&
+  !node.computed &&
+  !node.shorthand &&
+  semanticStaticPropertyKey(node.key, false) === "__proto__";
+
 /** TypeScript receiver annotations occupy no positional runtime parameter slot. */
 export const runtimeFunctionParameters = (
   node: t.Function,

@@ -227,6 +227,14 @@ result in an alias does not make its old field values immutable. Known array
 indices include holes; an element after a spread has only a minimum possible
 index. Unrelated properties and known array prefixes remain precise, and a
 getter read without a write does not invalidate the receiver's fields.
+Object-literal prototype chains retain inherited getter references through
+non-computed, non-shorthand `__proto__: value` setters and local literal aliases.
+An inherited getter keeps the object on which the property is read as its
+receiver; own data properties, methods and accessors shadow inherited getters.
+Object spread and rest select only own properties, so inherited getters are not
+copied, while inherited properties of a copied child remain reachable.
+Computed or shorthand `__proto__` properties remain ordinary own properties.
+This does not model `Object.create`, `Object.setPrototypeOf`, or execute getters.
 Nested callable returns are not assigned to their parent callable. Projected
 graph observations carry source ranges but never source text.
 
