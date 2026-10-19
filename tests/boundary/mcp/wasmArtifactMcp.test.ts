@@ -4,6 +4,7 @@ import {
   assertRecordedMcpEvidence,
 } from "../../fixtures/advertisedMcpTool.js";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
+import { STDIO_DEFAULT_MAX_BUFFER_SIZE } from "@modelcontextprotocol/server";
 import { expect, it, onTestFinished, vi } from "vitest";
 import { readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -14,7 +15,12 @@ import { wasmArtifactSummaryViewResultSchema } from "../../../src/domain/analysi
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { createServer } from "../../../src/server/createServer.js";
-import { ok } from "../../../src/domain/result.js";
+import { EvidenceMcpServer } from "../../../src/server/EvidenceMcpServer.js";
+import { registerWasmTools } from "../../../src/server/registerWasmTools.js";
+import { ToolResultDelivery } from "../../../src/server/toolResult.js";
+import { silentLogger } from "../../../src/logger.js";
+import { err, ok } from "../../../src/domain/result.js";
+import { AnalysisInputError } from "../../../src/domain/analysisErrorCore.js";
 import { createApplicationMcpHarness } from "../../fixtures/applicationMcpHarness.js";
 import { createTestBinarySession } from "../../fixtures/binarySession.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
@@ -608,48 +614,176 @@ it("rejects absent or inconsistent WASM source identity before deriving portable
   await harness.client.ping();
 });
 
-it("requires retention for WASM summary delivery while keeping fixed-server complete delivery", async () => {
-  const value = wasmArtifactFixture();
-  const service = new WasmArtifactService({
-    close: () => Promise.resolve(),
-    inspect: () => Promise.resolve(ok(wasmArtifactExecution(value))),
-  });
-  const session = createTestBinarySession(() => {
-    throw new Error("No deep provider");
-  });
-  const server = createServer(
-    { kind: "fixed", analysis: session },
-    { wasmArtifact: service },
-  );
-  const client = new Client({ name: "wasm-fixed-delivery", version: "1" });
-  const [a, b] = InMemoryTransport.createLinkedPair();
-  try {
+it.each(["success", "failure"] as const)(
+  "requires retention before WASM provider %s while preserving fixed-server complete delivery",
+  async (outcome) => {
+    const value = wasmArtifactFixture();
+    const inspect = vi.fn<WasmArtifactService["provider"]["inspect"]>(() =>
+      Promise.resolve(
+        outcome === "success"
+          ? ok(wasmArtifactExecution(value))
+          : err(
+              new AnalysisInputError("inspect_wasm_artifact", {
+                userMessage: "synthetic provider failure",
+              }),
+            ),
+      ),
+    );
+    const service = new WasmArtifactService({
+      close: () => Promise.resolve(),
+      inspect,
+    });
+    const session = createTestBinarySession(() => {
+      throw new Error("No deep provider");
+    });
+    const server = createServer(
+      { kind: "fixed", analysis: session },
+      { wasmArtifact: service },
+    );
+    const client = new Client({ name: "wasm-fixed-delivery", version: "1" });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    try {
+      await server.connect(b);
+      await client.connect(a);
+      const invalid = await client.callTool({
+        name: "inspect_wasm_artifact",
+        arguments: { path: 42, detail: "summary" },
+      });
+      expect(invalid).toMatchObject({
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: expect.stringContaining("Input validation error"),
+          },
+        ],
+      });
+      expect(inspect).not.toHaveBeenCalled();
+      const summary = await client.callTool({
+        name: "inspect_wasm_artifact",
+        arguments: { path: value.artifact.path, detail: "summary" },
+      });
+      expect(parseMcpToolError(summary)).toMatchObject({
+        error: {
+          code: "capability_unavailable",
+          message: expect.stringContaining("does not retain Evidence"),
+        },
+      });
+      expect(inspect).not.toHaveBeenCalled();
+      for (const detail of [undefined, "complete"] as const) {
+        const complete = await client.callTool({
+          name: "inspect_wasm_artifact",
+          arguments: {
+            path: value.artifact.path,
+            ...(detail === undefined ? {} : { detail }),
+          },
+        });
+        if (outcome === "success") {
+          expect(complete.isError).not.toBe(true);
+          expect(
+            parseEvidence(complete.structuredContent).normalized_result,
+          ).toEqual(value);
+        } else
+          expect(parseMcpToolError(complete).error).toMatchObject({
+            code: "invalid_request",
+            message: "synthetic provider failure",
+          });
+      }
+      expect(inspect).toHaveBeenCalledTimes(2);
+      expect(inspect).toHaveBeenLastCalledWith(
+        { path: value.artifact.path, glue_paths: [], candidate_paths: [] },
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+      await client.ping();
+    } finally {
+      await client.close();
+      await server.close();
+      await session.close();
+    }
+  },
+);
+
+it.each(["writer-only", "reader-only"] as const)(
+  "refuses WASM summary with %s retention before provider or ledger calls",
+  async (retention) => {
+    const value = wasmArtifactFixture();
+    const inspect = vi.fn(() =>
+      Promise.resolve(ok(wasmArtifactExecution(value))),
+    );
+    const record = vi.fn(() => ok("added" as const));
+    const lookup = vi.fn(() => undefined);
+    const service = new WasmArtifactService({
+      close: () => Promise.resolve(),
+      inspect,
+    });
+    const server = new EvidenceMcpServer(
+      { name: "wasm-partial-retention", version: "1" },
+      {},
+      undefined,
+      new ToolResultDelivery(STDIO_DEFAULT_MAX_BUFFER_SIZE),
+    );
+    registerWasmTools(
+      server,
+      service,
+      silentLogger,
+      retention === "writer-only" ? record : undefined,
+      undefined,
+      retention === "reader-only" ? lookup : undefined,
+    );
+    const client = new Client({
+      name: "wasm-partial-retention-test",
+      version: "1",
+    });
+    onTestFinished(async () => {
+      await client.close();
+      await server.close();
+      await service.close();
+    });
+    const [a, b] = InMemoryTransport.createLinkedPair();
     await server.connect(b);
     await client.connect(a);
-    const summary = await client.callTool({
+    const result = await client.callTool({
       name: "inspect_wasm_artifact",
       arguments: { path: value.artifact.path, detail: "summary" },
     });
-    expect(parseMcpToolError(summary)).toMatchObject({
-      error: {
-        code: "capability_unavailable",
-        message: expect.stringContaining("does not retain Evidence"),
-      },
-    });
-    const complete = await client.callTool({
-      name: "inspect_wasm_artifact",
-      arguments: { path: value.artifact.path },
-    });
-    expect(complete.isError).not.toBe(true);
-    expect(parseEvidence(complete.structuredContent).normalized_result).toEqual(
-      value,
-    );
+    expect(parseMcpToolError(result).error.code).toBe("capability_unavailable");
+    expect(inspect).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
+    expect(lookup).not.toHaveBeenCalled();
     await client.ping();
-  } finally {
-    await client.close();
-    await server.close();
-    await session.close();
-  }
+  },
+);
+
+it("preserves provider failure for WASM summary when retention is available", async () => {
+  const inspect = vi.fn<WasmArtifactService["provider"]["inspect"]>(() =>
+    Promise.resolve(
+      err(
+        new AnalysisInputError("inspect_wasm_artifact", {
+          userMessage: "synthetic provider failure",
+        }),
+      ),
+    ),
+  );
+  const service = new WasmArtifactService({
+    close: () => Promise.resolve(),
+    inspect,
+  });
+  const harness = await createApplicationMcpHarness({
+    serverOptions: { wasmArtifact: service },
+  });
+  onTestFinished(harness.close);
+  const before = harness.session.exportEvidenceBundle().records.length;
+  const result = await harness.client.callTool({
+    name: "inspect_wasm_artifact",
+    arguments: { path: wasmArtifactFixture().artifact.path, detail: "summary" },
+  });
+  expect(parseMcpToolError(result).error).toMatchObject({
+    code: "invalid_request",
+    message: "synthetic provider failure",
+  });
+  expect(inspect).toHaveBeenCalledOnce();
+  expect(harness.session.exportEvidenceBundle().records).toHaveLength(before);
+  await harness.client.ping();
 });
 
 it("retries cleanup of the injected WASM module after server shutdown fails", async () => {

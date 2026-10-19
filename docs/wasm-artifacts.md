@@ -100,6 +100,12 @@ Candidates are caller-selected files; their identity does not imply validation.
 
 Both CLI and MCP use the same typed port and application service. MCP publishes
 SDK-compatible schemas and records Evidence for `get_evidence_bundle` readback.
+On a session-backed MCP server, `detail: "summary"` retains the complete
+inspection and returns a compact view; use its `parent_evidence_id` with
+`inspect_analysis_view` to read the remaining content. An embedded fixed server
+without Evidence retention rejects summary delivery with `capability_unavailable`
+before invoking the WASM provider. Omit `detail` or select `"complete"` to receive
+the complete inspection inline on that server.
 See [WABT provenance](https://github.com/morluto/rea/blob/main/third_party/wabt/README.md) and
 [testing](testing.md#offline-wasm-artifacts) for real-tool verification.
 
