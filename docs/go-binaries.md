@@ -84,6 +84,9 @@ It does not prove that the binary is not Go. Stripping, old builds, deliberate
 removal and obfuscation can limit metadata. A malformed supported container or
 recognized build-info record returns an input-format failure. Unsupported
 containers receive a separate unsupported-target failure.
+Each thin Mach-O load command must be aligned to the header width: four bytes
+for 32-bit images and eight bytes for 64-bit images. This check also applies to
+unrecognized commands, before reporting metadata presence or absence.
 
 Symlinks and nonregular files are rejected. The shared stable reader detects
 replacement and observed in-place changes during acquisition. Missing files,

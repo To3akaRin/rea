@@ -65,6 +65,10 @@ packages or the compiler.
 
 Universal Mach-O containers are unsupported. Select a thin slice first. ELF,
 PE, and thin Mach-O are the supported containers.
+The shared Mach-O container reader checks each load command's size against the
+image width (four-byte alignment for 32-bit, eight-byte alignment for 64-bit).
+Malformed commands return an input-format failure rather than a successful
+report of missing dependency metadata.
 
 Package and dependency counts are checked against the minimum required JSON
 representation before graph allocation or schema cloning. Oversized graphs

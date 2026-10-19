@@ -10,12 +10,38 @@ import {
   GoBinaryResourceFailure,
 } from "../../../src/go/GoBinaryImage.js";
 import { readGoMachoImage } from "../../../src/go/GoMachoImage.js";
+import { machoLoadCommands } from "../../fixtures/machoLoadCommands.js";
 import {
   createGoBinaryFixture,
   createGoSplitElfFixture,
   createGoOverlappingElfFixture,
   GO_MODULE_TEXT,
 } from "../../fixtures/go/image.js";
+
+it.each(["little", "big"] as const)(
+  "validates every Mach-O command against its header width (%s endian)",
+  (byteOrder) => {
+    for (const sizes of [[12], [8, 12, 12], [10]])
+      expect(() =>
+        readGoBinaryImage(machoLoadCommands(64, sizes, byteOrder)),
+      ).toThrow(/load command size is invalid/);
+    expect(() =>
+      readGoBinaryImage(machoLoadCommands(32, [10], byteOrder)),
+    ).toThrow(/load command size is invalid/);
+    for (const [bits, sizes] of [
+      [64, [8, 16]],
+      [32, [8, 12]],
+    ] as const)
+      expect(
+        readGoBinaryImage(machoLoadCommands(bits, sizes, byteOrder)),
+      ).toMatchObject({
+        format: "macho",
+        bits,
+        byte_order: byteOrder,
+        build_info: null,
+      });
+  },
+);
 
 it("bounds cumulative header searches across overlapping ELF file spans", () => {
   const bytes = createGoOverlappingElfFixture();

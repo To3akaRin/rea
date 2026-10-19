@@ -16,6 +16,7 @@ export const readGoMachoImage = (bytes: Buffer): GoBinaryContainer => {
   const bits = magic === 0xfeedfacf || magic === 0xcffaedfe ? 64 : 32;
   const reader = new GoBinaryReader(bytes, little);
   const headerSize = bits === 64 ? 32 : 28;
+  const commandAlignment = bits / 8;
   reader.range(0, headerSize, "Mach-O header");
   const count = reader.u32(16);
   const commandBytes = reader.u32(20);
@@ -40,7 +41,7 @@ export const readGoMachoImage = (bytes: Buffer): GoBinaryContainer => {
   for (let index = 0; index < count; index++) {
     const command = reader.u32(offset);
     const size = reader.u32(offset + 4);
-    if (size < 8 || size % 4 !== 0 || size > end - offset)
+    if (size < 8 || size % commandAlignment !== 0 || size > end - offset)
       throw new GoBinaryFormatFailure(
         "malformed",
         "Mach-O load command size is invalid or truncated",
