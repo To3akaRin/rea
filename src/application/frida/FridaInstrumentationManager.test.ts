@@ -10,6 +10,7 @@ import type {
   Signal,
 } from "frida";
 import { AnalysisInputError } from "../../domain/analysisErrorCore.js";
+import { jsonObjectSchema } from "../../domain/jsonValue.js";
 import { FridaInstrumentationManager } from "../../frida/FridaInstrumentationManager.js";
 
 const signal = <Handler extends (...args: never[]) => void>() => {
@@ -1245,6 +1246,154 @@ it("bounds oversized Frida message metadata before retaining it", async () => {
     expect(JSON.stringify(message).length).toBeLessThan(100_000);
   }
   await manager.closeAll();
+});
+
+const MESSAGE_TEXT_LIMIT = 32 * 1024;
+const textPrefix = (reserved: number) =>
+  "x".repeat(MESSAGE_TEXT_LIMIT - reserved);
+
+it.each([
+  ["ASCII at the limit", textPrefix(0), textPrefix(0), false],
+  ["ASCII beyond the limit", textPrefix(0) + "x", textPrefix(0), true],
+  [
+    "lone high surrogate at the limit",
+    textPrefix(6) + "\ud800",
+    textPrefix(6) + "\ud800",
+    false,
+  ],
+  [
+    "trailing high surrogate beyond the limit",
+    textPrefix(3) + "\ud800",
+    textPrefix(3),
+    true,
+  ],
+  [
+    "repeated high surrogates",
+    "\ud800".repeat(10_922),
+    "\ud800".repeat(Math.floor(MESSAGE_TEXT_LIMIT / 6)),
+    true,
+  ],
+  [
+    "high surrogate followed by ASCII",
+    textPrefix(6) + "\ud800x",
+    textPrefix(6) + "\ud800",
+    true,
+  ],
+  [
+    "lone low surrogate at the limit",
+    textPrefix(6) + "\udc00",
+    textPrefix(6) + "\udc00",
+    false,
+  ],
+  [
+    "lone low surrogate beyond the limit",
+    textPrefix(3) + "\udc00",
+    textPrefix(3),
+    true,
+  ],
+  [
+    "paired surrogates at the limit",
+    textPrefix(4) + "\ud800\udc00",
+    textPrefix(4) + "\ud800\udc00",
+    false,
+  ],
+  [
+    "paired surrogates beyond the limit",
+    textPrefix(3) + "\ud800\udc00",
+    textPrefix(3),
+    true,
+  ],
+  ["escaped quote", textPrefix(2) + '"x', textPrefix(2) + '"', true],
+  ["escaped backslash", textPrefix(2) + "\\x", textPrefix(2) + "\\", true],
+  ["short control escape", textPrefix(2) + "\nx", textPrefix(2) + "\n", true],
+  [
+    "Unicode control escape",
+    textPrefix(6) + "\u0000x",
+    textPrefix(6) + "\u0000",
+    true,
+  ],
+  ["UTF-8 multibyte text", textPrefix(3) + "雪x", textPrefix(3) + "雪", true],
+] as const)(
+  "bounds serialized metadata for %s and retains matching script/session flags",
+  async (_name, input, retained, truncated) => {
+    const bindings = new FakeDeviceManager();
+    bindings.device.session.nextMessage = {
+      type: "error",
+      description: input,
+      stack: input,
+      fileName: input,
+    };
+    const { manager, started } = await startLocalAttachedSession(bindings);
+    if (!started.ok) throw started.error;
+    try {
+      const loaded = await manager.loadScript(started.value.sessionId, {
+        sourceKind: "inline",
+        source: "// synthetic error signal",
+      });
+      if (!loaded.ok) throw loaded.error;
+      const message = jsonObjectSchema.parse(loaded.value.messages[0]);
+      for (const field of ["description", "stack", "file_name"] as const) {
+        const value = message[field];
+        expect(value).toBe(retained);
+        if (typeof value !== "string") throw new Error(`Missing ${field}`);
+        expect(
+          Buffer.byteLength(JSON.stringify(value)) - 2,
+        ).toBeLessThanOrEqual(MESSAGE_TEXT_LIMIT);
+        if (truncated)
+          expect(message).toHaveProperty(`${field}_truncated`, true);
+        else expect(message).not.toHaveProperty(`${field}_truncated`);
+      }
+      expect(loaded.value.messagesTruncated).toBe(truncated);
+      expect(manager.status(started.value.sessionId)).toMatchObject({
+        messages: loaded.value.messages,
+        messagesTruncated: truncated,
+      });
+    } finally {
+      await manager.closeAll();
+    }
+    expect(bindings.device.session.scripts[0]?.isDestroyed).toBe(true);
+    expect(bindings.device.session.isDetached()).toBe(true);
+  },
+);
+
+it("charges lone surrogates in message types and beside redacted authentication values", async () => {
+  const token = "fixture-remote-authentication";
+  const bindings = new FakeDeviceManager();
+  bindings.device.session.nextMessage = {
+    type: "\ud800".repeat(1_365),
+    description: textPrefix(16) + "\ud800" + token + "!",
+  };
+  const manager = new FridaInstrumentationManager({ deviceManager: bindings });
+  try {
+    const started = await manager.startSession({
+      mode: "attach",
+      remote: { address: "127.0.0.1:27042", token },
+      pid: 512,
+    });
+    if (!started.ok) throw started.error;
+    const loaded = await manager.loadScript(started.value.sessionId, {
+      sourceKind: "inline",
+      source: "// synthetic credential-bearing signal",
+    });
+    if (!loaded.ok) throw loaded.error;
+    const message = jsonObjectSchema.parse(loaded.value.messages[0]);
+    expect(message).toMatchObject({
+      type: "\ud800".repeat(Math.floor((4 * 1024) / 6)),
+      type_truncated: true,
+      description: textPrefix(16) + "\ud800[redacted]",
+      description_truncated: true,
+    });
+    expect(JSON.stringify(message)).not.toContain(token);
+    expect(loaded.value.messagesTruncated).toBe(true);
+    expect(manager.status(started.value.sessionId)).toMatchObject({
+      messages: loaded.value.messages,
+      messagesTruncated: true,
+    });
+  } finally {
+    await manager.closeAll();
+  }
+  expect(bindings.device.session.isDetached()).toBe(true);
+  expect(bindings.device.session.scripts[0]?.isDestroyed).toBe(true);
 });
 
 it("serializes script loading against concurrent close and unloads the loaded script", async () => {

@@ -55,7 +55,7 @@ const gate = () => {
   };
 };
 
-const nativeFixture = () => {
+const nativeFixture = (message?: FridaMessage) => {
   const created: string[] = [];
   const loaded: string[] = [];
   const unloaded: string[] = [];
@@ -109,7 +109,7 @@ const nativeFixture = () => {
         async load() {
           await controls.load();
           loaded.push(source);
-          listener?.({ type: "send", payload: source }, null);
+          listener?.(message ?? { type: "send", payload: source }, null);
           controls.afterLoad();
         },
         async unload() {
@@ -179,8 +179,8 @@ const nativeFixture = () => {
   };
 };
 
-const connectedFixture = async () => {
-  const native = nativeFixture();
+const connectedFixture = async (message?: FridaMessage) => {
+  const native = nativeFixture(message);
   const manager = new FridaInstrumentationManager({
     deviceManager: native.deviceManager,
   });
@@ -227,6 +227,50 @@ const connectedFixture = async () => {
     );
   return { ...native, manager, session, server, client, start, load };
 };
+
+it("retains bounded surrogate metadata and truncation through load, status and stored Evidence", async () => {
+  const description = "x".repeat(32 * 1024 - 3) + "\ud800";
+  const { client, start, load, session } = await connectedFixture({
+    type: "error",
+    description,
+    stack: description,
+    fileName: description,
+  });
+  const id = await start();
+  const loaded = await load(id, "// simulated native error message");
+  expect(loaded.isError).not.toBe(true);
+  const loadEvidence = toolContract("load_frida_script").outputSchema.parse(
+    loaded.structuredContent,
+  );
+  const result = loadEvidence.normalized_result;
+  expect(result.messages_truncated).toBe(true);
+  const message = jsonObjectSchema.parse(result.messages[0]);
+  for (const field of ["description", "stack", "file_name"] as const) {
+    const value = message[field];
+    expect(value).toBe(description.slice(0, -1));
+    if (typeof value !== "string") throw new Error(`Missing ${field}`);
+    expect(Buffer.byteLength(JSON.stringify(value)) - 2).toBeLessThanOrEqual(
+      32 * 1024,
+    );
+    expect(message).toHaveProperty(`${field}_truncated`, true);
+  }
+  const response = await client.callTool({
+    name: "frida_session_status",
+    arguments: { session_id: id },
+  });
+  expect(response.isError).not.toBe(true);
+  const statusEvidence = toolContract(
+    "frida_session_status",
+  ).outputSchema.parse(response.structuredContent);
+  expect(statusEvidence.normalized_result).toMatchObject({
+    messages: result.messages,
+    messages_truncated: true,
+  });
+  expect(session.evidenceById(loadEvidence.evidence_id)).toEqual(loadEvidence);
+  expect(session.evidenceById(statusEvidence.evidence_id)).toEqual(
+    statusEvidence,
+  );
+});
 
 it("declares non-destructive session mutation when status retains Evidence", async () => {
   const { client, start } = await connectedFixture();
