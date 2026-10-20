@@ -75,7 +75,7 @@ interface BindRun {
   readonly start: bigint;
   count: bigint;
   readonly stride: bigint;
-  readonly binding: Import;
+  readonly binding: Import | { readonly unsupportedType: number };
 }
 
 /** Library ordinal to install name; 0 and negative ordinals are special lookups. */
@@ -548,6 +548,7 @@ const sleb = (bytes: Buffer, cursor: { at: number }, end: number): bigint => {
 
 /** Registers of the `LC_DYLD_INFO` bind state machine. */
 interface BindState {
+  type: number;
   ordinal: number;
   segmentIndex: number;
   symbol: string;
@@ -586,6 +587,7 @@ const setBindRegister = (
       return true;
     }
     case 0x50:
+      state.type = immediate;
       return true;
     case 0x60:
       state.addend = sleb(bytes, cursor, end);
@@ -613,13 +615,15 @@ const readBindStream = (
   image: FixupImage,
   range: FixupCommands["binds"][number],
   binds: BindRun[],
-): void => {
+): readonly number[] => {
   const { bytes } = image;
   const end = range.offset + range.size;
   if (end > bytes.length)
     throw new RangeError("Bind opcodes exceed the target");
   const cursor = { at: range.offset };
+  const unsupportedTypes = new Set<number>();
   const state: BindState = {
+    type: range.stream === "bind" ? 0 : 1,
     ordinal: 0,
     segmentIndex: -1,
     symbol: "",
@@ -633,7 +637,8 @@ const readBindStream = (
     if (segment === undefined)
       throw new RangeError("Bind location has no selected segment");
     const stride = 8n + skip;
-    const end = state.address + (count - 1n) * stride + 8n;
+    const width = state.type === 2 || state.type === 3 ? 4n : 8n;
+    const end = state.address + (count - 1n) * stride + width;
     if (state.address < segment.address || end > segment.address + segment.size)
       throw new RangeError("Bind expansion leaves its file-backed segment");
   };
@@ -641,24 +646,25 @@ const readBindStream = (
     if (count === 0n) return;
     preflightRun(count, skip);
     const stride = 8n + skip;
-    const binding: Import = {
-      symbol: state.symbol,
-      library:
-        range.stream === "weak"
-          ? null
-          : libraryName(state.ordinal, image.dylibs),
-      weak: state.weak,
-      addend: state.addend,
-    };
+    const binding: BindRun["binding"] =
+      state.type === 1
+        ? {
+            symbol: state.symbol,
+            library:
+              range.stream === "weak"
+                ? null
+                : libraryName(state.ordinal, image.dylibs),
+            weak: state.weak,
+            addend: state.addend,
+          }
+        : { unsupportedType: state.type };
+    if (state.type !== 1) unsupportedTypes.add(state.type);
     const previous = binds.at(-1);
     if (
       previous !== undefined &&
       previous.stride === stride &&
       previous.start + previous.count * stride === state.address &&
-      previous.binding.symbol === binding.symbol &&
-      previous.binding.library === binding.library &&
-      previous.binding.weak === binding.weak &&
-      previous.binding.addend === binding.addend
+      sameBinding(previous.binding, binding)
     ) {
       previous.count += count;
     } else {
@@ -674,7 +680,7 @@ const readBindStream = (
     switch (byte & 0xf0) {
       case 0x00:
         // DONE separates lazy-bind entries; other streams end here.
-        if (range.stream !== "lazy") return;
+        if (range.stream !== "lazy") return [...unsupportedTypes];
         break;
       case 0x90:
         bind(1n, 0n);
@@ -699,6 +705,38 @@ const readBindStream = (
         throw new RangeError(`Unsupported bind opcode 0x${byte.toString(16)}`);
     }
   }
+  return [...unsupportedTypes];
+};
+
+const sameBinding = (
+  left: BindRun["binding"],
+  right: BindRun["binding"],
+): boolean =>
+  "unsupportedType" in left
+    ? "unsupportedType" in right &&
+      left.unsupportedType === right.unsupportedType
+    : !("unsupportedType" in right) &&
+      left.symbol === right.symbol &&
+      left.library === right.library &&
+      left.weak === right.weak &&
+      left.addend === right.addend;
+
+/** An eight-byte pointer read must not overlap an unsupported relocation. */
+const overlapsUnsupportedBind = (
+  run: BindRun,
+  address: bigint,
+  type: number,
+): boolean => {
+  // Apple advances every bind opcode by pointer size even for 32-bit text fixups.
+  const width = type === 2 || type === 3 ? 4n : 8n;
+  const distance = address - run.start;
+  const first = distance < 0n ? 0n : distance / run.stride;
+  for (const index of [first, first + 1n]) {
+    const start = run.start + index * run.stride;
+    if (index < run.count && start < address + 8n && start + width > address)
+      return true;
+  }
+  return false;
 };
 
 /** Build pointer decoding for one slice from its fixup load commands. */
@@ -732,8 +770,12 @@ export const parsePointerFixups = (
   let decoded = 0;
   for (const stream of commands.binds)
     try {
-      readBindStream(image, stream, binds);
-      decoded++;
+      const unsupportedTypes = readBindStream(image, stream, binds);
+      for (const type of unsupportedTypes)
+        failures.push(
+          `${stream.stream} bind opcodes: Unsupported legacy bind type ${type}; only pointer binds are decoded`,
+        );
+      if (unsupportedTypes.length === 0) decoded++;
     } catch (cause: unknown) {
       failures.push(
         `${stream.stream} bind opcodes: ${cause instanceof Error ? cause.message : String(cause)}`,
@@ -750,9 +792,19 @@ export const parsePointerFixups = (
     decoded,
     unreadRebaseBytes,
     decode(address, raw) {
-      let match: BindRun | undefined;
+      let match: Import | undefined;
       for (const run of binds) {
         const { start, count, stride } = run;
+        if ("unsupportedType" in run.binding) {
+          if (
+            overlapsUnsupportedBind(run, address, run.binding.unsupportedType)
+          )
+            return {
+              kind: "unsupported",
+              reason: `Unsupported legacy bind type ${run.binding.unsupportedType} overlaps pointer location 0x${address.toString(16)}`,
+            };
+          continue;
+        }
         const distance = address - start;
         if (
           distance >= 0n &&
@@ -764,12 +816,12 @@ export const parsePointerFixups = (
               kind: "unsupported",
               reason: `Ambiguous bind records target pointer location 0x${address.toString(16)}`,
             };
-          match = run;
+          match = run.binding;
         }
       }
       return match === undefined
         ? { kind: "rebase", target: raw }
-        : { kind: "bind", ...match.binding };
+        : { kind: "bind", ...match };
     },
   };
 };

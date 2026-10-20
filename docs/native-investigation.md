@@ -428,7 +428,12 @@ complete observation.
   Pointers are decoded through the image's fixups:
   - `LC_DYLD_CHAINED_FIXUPS` rebases and binds, including the authenticated
     arm64e formats;
-  - legacy `LC_DYLD_INFO` bind opcodes.
+  - legacy `LC_DYLD_INFO` pointer bind opcodes. Explicit text relocation or
+    unknown bind types retain unsupported relocation ranges with partial
+    `pointer_fixups` coverage. Pointer reads overlapping those ranges remain
+    unsupported even when stored bytes resemble a local address. A later
+    pointer-type reset, established earlier pointer binds, independent streams
+    and ordinary pointers outside those ranges remain readable.
 
   So an external superclass resolves from its `_OBJC_CLASS_$_` bind (for
   example `NSObject`). The `pointer_fixups` coverage facet names the mechanism.

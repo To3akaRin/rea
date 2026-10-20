@@ -178,6 +178,7 @@ describe("Apple dispatch pointer fixup metadata", () => {
       bytes.writeUInt32LE(0x80000022, 184);
       bytes.writeUInt32LE(48, 188);
       const bindings = Buffer.from([
+        0x51, // Regular streams must explicitly select pointer type.
         0x40,
         ...Buffer.from("_OBJC_CLASS_$_NSObject\0"),
         0x70,

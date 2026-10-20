@@ -844,6 +844,114 @@ describe("chained import library identity", () => {
     },
   );
 });
+describe("legacy pointer bind types", () => {
+  it.each([2, 3, 0, 15])(
+    "does not treat explicit bind type %i as a pointer binding",
+    (type) => {
+      const opcodes = Buffer.from([
+        0x11,
+        0x40,
+        ...Buffer.from("_OBJC_CLASS_$_NSObject\0"),
+        0x51,
+        0x71,
+        0x08,
+        0x90,
+        0x50 | type,
+        0x90,
+        0x00,
+      ]);
+      const lazy = Buffer.from([
+        0x40,
+        ...Buffer.from("_free\0"),
+        0x71,
+        0x20,
+        0x90,
+        0x00,
+      ]);
+      const fixups = parsePointerFixups(
+        Buffer.concat([opcodes, lazy]),
+        {
+          chained: null,
+          binds: [
+            { offset: 0, size: opcodes.length, stream: "bind" },
+            { offset: opcodes.length, size: lazy.length, stream: "lazy" },
+          ],
+          rebases: [],
+          dylibs: ["/usr/lib/libobjc.A.dylib"],
+        },
+        SEGMENTS,
+        BASE,
+      );
+      expect(fixups.failures).toEqual([
+        `bind bind opcodes: Unsupported legacy bind type ${type}; only pointer binds are decoded`,
+      ]);
+      expect(fixups.examined).toBe(2);
+      expect(fixups.decoded).toBe(1);
+      expect(fixups.decode(BASE + 0x4020n, 0n)).toMatchObject({
+        kind: "bind",
+        symbol: "_free",
+      });
+      expect(fixups.decode(BASE + 0x4008n, 0n)).toMatchObject({
+        kind: "bind",
+        symbol: "_OBJC_CLASS_$_NSObject",
+      });
+      expect(fixups.decode(BASE + 0x4010n, BASE + 0x200n)).toMatchObject({
+        kind: "unsupported",
+      });
+    },
+  );
+});
+
+describe("legacy bind location ownership", () => {
+  it.each(["bind", "weak", "lazy"] as const)(
+    "retains unsupported ranges and a reset pointer type in %s streams",
+    (stream) => {
+      const opcodes = Buffer.from([
+        0x11,
+        0x40,
+        ...Buffer.from("_OBJC_CLASS_$_NSObject\0"),
+        0x52,
+        0x71,
+        0x08,
+        0x90,
+        0x51,
+        0x90,
+        0x00,
+      ]);
+      const fixups = parsePointerFixups(
+        opcodes,
+        {
+          chained: null,
+          binds: [{ offset: 0, size: opcodes.length, stream }],
+          rebases: [],
+          dylibs: ["/usr/lib/libobjc.A.dylib"],
+        },
+        SEGMENTS,
+        BASE,
+      );
+      for (const offset of [0x4004n, 0x4008n, 0x400bn])
+        expect(fixups.decode(BASE + offset, BASE + 0x200n)).toMatchObject({
+          kind: "unsupported",
+        });
+      // Text relocation width is four, but DO_BIND still advances by eight.
+      expect(fixups.decode(BASE + 0x400cn, BASE + 0x200n)).toEqual({
+        kind: "rebase",
+        target: BASE + 0x200n,
+      });
+      expect(fixups.decode(BASE + 0x4010n, 0n)).toMatchObject({
+        kind: "bind",
+        symbol: "_OBJC_CLASS_$_NSObject",
+      });
+      expect(fixups.decode(BASE + 0x4030n, BASE + 0x200n)).toEqual({
+        kind: "rebase",
+        target: BASE + 0x200n,
+      });
+      expect(fixups.decoded).toBe(0);
+      expect(fixups.failures).toHaveLength(1);
+    },
+  );
+});
+
 describe("legacy pointer fixup streams", () => {
   it("interprets legacy bind, weak-bind and lazy-bind opcodes", () => {
     const opcodes = Buffer.from([
@@ -913,6 +1021,7 @@ describe("legacy pointer fixup streams", () => {
     const back = [0xf8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01];
     const opcodes = Buffer.from([
       0x11, // SET_DYLIB_ORDINAL_IMM 1
+      0x51, // SET_TYPE_IMM pointer
       0x40,
       ...Buffer.from("__ZdlPv\0"),
       0x71,
@@ -954,6 +1063,7 @@ describe("legacy bind operand decoding", () => {
   const addendStream = (addend: readonly number[]) =>
     Buffer.from([
       0x11, // SET_DYLIB_ORDINAL_IMM 1
+      0x51, // SET_TYPE_IMM pointer
       0x40,
       ...Buffer.from("_x\0"),
       0x71,
@@ -1058,6 +1168,7 @@ describe("legacy bind operand decoding", () => {
 
   const addressStream = (operand: readonly number[]) =>
     Buffer.from([
+      0x51, // SET_TYPE_IMM pointer
       0x40,
       ...Buffer.from("_x\0"),
       0x71,
