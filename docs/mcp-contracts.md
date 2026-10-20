@@ -87,6 +87,15 @@ structured data and matching text projection. Oversized errors are retained
 as Evidence before delivery of a bounded diagnostic with an export reference;
 if retention is unavailable or fails, the diagnostic reports that reason.
 
+Residual unknown mutation failures preserve their registry reason. A duplicate
+explicit `record_unknown` is a non-retryable `execution_failure` with
+`details.reason: "already-exists"`; repeating it cannot refresh an existing
+identity. Use `list_unknowns` to find its current head and, when intending a
+change, send the complete desired state to `update_unknown` with the current
+`expected_revision`. Only an actual stale revision returns retryable
+`revision_conflict`. Invalid state transitions and missing or invalid references
+have their own non-retryable diagnostics and recovery guidance.
+
 `get_call_graph` returns a `graph` keyed by traversal depth and a top-level
 `limitations` array with deduplicated execution caveats. Each node keeps its
 relationship coverage and read-specific `limitations`, alongside observed

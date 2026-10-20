@@ -38,6 +38,42 @@ import {
 } from "./analysisErrorBase.js";
 import type { AnalysisErrorProjection } from "./analysisErrorProjection.js";
 
+const UNKNOWN_REGISTRY_DIAGNOSTICS: Readonly<
+  Record<UnknownRegistryError["reason"], { message: string; action: string }>
+> = {
+  "not-found": {
+    message:
+      "The requested residual unknown does not exist in this session. Check the unknown_id and try again.",
+    action: "Check that the unknown_id belongs to this session, then retry.",
+  },
+  "already-exists": {
+    message:
+      "A residual unknown with this identity already exists in this session.",
+    action:
+      "Use list_unknowns to find the existing head. To change it, call update_unknown with its current expected_revision and the complete desired state.",
+  },
+  "revision-conflict": {
+    message:
+      "Evidence state changed before the update completed. Refresh the current state and try again.",
+    action:
+      "Use list_unknowns to refresh the current head, then call update_unknown with its current expected_revision and the complete desired state.",
+  },
+  "invalid-transition": {
+    message: "The requested residual unknown state transition is invalid.",
+    action:
+      "Check the requested status, supporting and contradicting Evidence, and resolution against the residual unknown transition rules before updating.",
+  },
+  integrity: {
+    message: "The residual unknown references invalid or missing session data.",
+    action:
+      "Check the referenced Evidence and related unknowns in this session, then correct the references before retrying.",
+  },
+  limit: {
+    message: "The residual unknown mutation exceeds a registry limit.",
+    action: "Reduce the submitted registry data before retrying.",
+  },
+};
+
 export const analysisErrorRemediationAction = (
   error: AnalysisError,
 ): string => {
@@ -136,8 +172,8 @@ export const analysisErrorRemediationAction = (
     error.remediationAction !== undefined
   )
     return error.remediationAction;
-  if (error instanceof UnknownRegistryError && error.reason === "not-found")
-    return "Check that the unknown_id belongs to this session, then retry.";
+  if (error instanceof UnknownRegistryError)
+    return UNKNOWN_REGISTRY_DIAGNOSTICS[error.reason].action;
   return analysisErrorUserMessage(error);
 };
 
@@ -269,10 +305,8 @@ export const analysisErrorUserMessage = (error: AnalysisError): string => {
   if (error instanceof EvidenceIntegrityError)
     return "Evidence is invalid or has changed. Recreate or re-import it, then try again.";
   if (error instanceof EvidenceFileError) return evidenceFileMessage(error);
-  if (error instanceof UnknownRegistryError && error.reason === "not-found")
-    return "The requested residual unknown does not exist in this session. Check the unknown_id and try again.";
   if (error instanceof UnknownRegistryError)
-    return "Evidence state changed before the update completed. Refresh the current state and try again.";
+    return UNKNOWN_REGISTRY_DIAGNOSTICS[error.reason].message;
   if (error instanceof ConfigurationError)
     return error.settings.length === 0
       ? "REA configuration is invalid. Run `rea doctor` and fix the reported setting."

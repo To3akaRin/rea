@@ -757,6 +757,55 @@ describe("analysis error projection: caller contract", () => {
   });
 });
 
+describe("residual unknown failure recovery", () => {
+  it.each([
+    [
+      "already-exists",
+      "execution_failure",
+      false,
+      "already exists",
+      "update_unknown",
+    ],
+    [
+      "revision-conflict",
+      "revision_conflict",
+      true,
+      "state changed",
+      "expected_revision",
+    ],
+    [
+      "invalid-transition",
+      "execution_failure",
+      false,
+      "transition is invalid",
+      "transition rules",
+    ],
+    [
+      "integrity",
+      "evidence_integrity_mismatch",
+      false,
+      "invalid or missing",
+      "references",
+    ],
+    ["limit", "truncated", false, "registry limit", "Reduce"],
+  ] as const)(
+    "preserves actionable %s registry failure semantics",
+    (reason, code, retryable, message, recovery) => {
+      const projected = projectAnalysisError(new UnknownRegistryError(reason));
+      expect(projected).toMatchObject({
+        code,
+        retryable,
+        message: expect.stringContaining(message),
+        remediation: { action: expect.stringContaining(recovery) },
+        details: { reason },
+      });
+      expect(analysisErrorProjectionSchema.safeParse(projected).success).toBe(
+        true,
+      );
+    },
+  );
+});
+
 describe("analysis error projection: operational diagnostics", () => {
   it("distinguishes an observed Hopper exit from an undetermined provider failure", () => {
     const exited = projectAnalysisError(
