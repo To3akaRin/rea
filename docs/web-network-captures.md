@@ -139,7 +139,10 @@ nested messages or groups. Repeated field numbers remain separate occurrences.
 Without a schema, varints and fixed-width values retain exact unsigned decimal
 representations. Length-delimited UTF-8, nested-message and packed readings
 are candidates; REA does not choose one or invent field names or signedness.
-Nested candidate ranges remain accessible without recursively expanding them.
+Nested candidate checks accept properly matched proto2 groups within the same
+64-level group budget as wire decoding. Missing, mismatched or unexpected group
+terminators are not valid nested-message candidates. Nested candidate ranges
+remain accessible without recursively expanding them.
 Malformed messages retain the parsed prefix and an exact error offset.
 Compressed frames and encoded HTTP bodies remain unknown; they are not
 silently treated as empty messages.

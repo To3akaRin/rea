@@ -50,14 +50,14 @@ const textOf = (bytes: Uint8Array): string | undefined => {
   }
 };
 
-/** An allocation-free syntactic candidate check, not a claim about the payload's type. */
+/** A source-bounded syntactic candidate check, not a claim about the payload's type. */
 const messageCandidate = async (
   bytes: Uint8Array,
   start: number,
   end: number,
   budget: ProtobufBudget,
 ): Promise<boolean> => {
-  if (start === end) return true;
+  const groups: number[] = [];
   while (start < end) {
     await budget.checkpoint();
     const tag = readProtobufVarint(bytes, start, end);
@@ -79,9 +79,14 @@ const messageCandidate = async (
       if (size === undefined || size.value > BigInt(end - size.end))
         return false;
       start = size.end + Number(size.value);
+    } else if (type === 3) {
+      if (groups.length >= WEB_NETWORK_CAPTURE_LIMITS.depth) return false;
+      groups.push(Number(tag.value >> 3n));
+    } else if (type === 4) {
+      if (groups.pop() !== Number(tag.value >> 3n)) return false;
     } else return false;
   }
-  return start === end;
+  return start === end && groups.length === 0;
 };
 
 const packedVarintCandidate = async (

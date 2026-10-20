@@ -73,6 +73,60 @@ async function prepareMcpCapture(
 }
 
 captureTest(
+  "keeps valid proto2 groups among nested-message candidates through CLI and MCP",
+  async ({ cli, mcp }) => {
+    const root = await createTestTempDirectory("rea-protobuf-group-candidate-");
+    for (const [name, payload, candidate] of [
+      ["group", "0b10010c", true],
+      ["nested-groups", "0b131801140c", true],
+      ["mismatched", "0b100114", false],
+      ["missing-end", "0b1001", false],
+      ["unexpected-end", "0c", false],
+      ["truncated-fixed", "0b15000c", false],
+    ] as const) {
+      const bytes = Buffer.from(payload, "hex");
+      const body = Buffer.concat([Buffer.from([10, bytes.length]), bytes]);
+      const path = join(root, `${name}.har`);
+      await writeFile(path, protobufHar(body, "application/x-protobuf"));
+      const response = await mcp.call("inspect_web_network_capture", {
+        capture_path: path,
+        format: "har",
+        record_ordinals: [0],
+      });
+      expect(response.isError, JSON.stringify(response)).not.toBe(true);
+      const observed = await cli.run({
+        arguments: [
+          "inspect-web-network-capture",
+          path,
+          "har",
+          "--record",
+          "0",
+          "--json",
+        ],
+      });
+      expect(observed.exitCode, observed.stdout + observed.stderr).toBe(0);
+      const evidence = parseEvidence(response.structuredContent);
+      expect(parseEvidence(observed.json).evidence_id).toBe(
+        evidence.evidence_id,
+      );
+      const decoded = webNetworkCaptureSchema.parse(evidence.normalized_result)
+        .records[0]?.protobuf?.[0];
+      expect(decoded?.status).toBe("complete");
+      expect(decoded?.fields).toHaveLength(1);
+      expect(decoded?.fields[0]).toMatchObject({
+        offset: 0,
+        payload_offset: 2,
+        payload_bytes: bytes.length,
+      });
+      expect(
+        decoded?.fields[0]?.interpretations?.includes("nested-message"),
+        name,
+      ).toBe(candidate);
+    }
+  },
+);
+
+captureTest(
   "excludes Protobuf values in text framing and trailer credentials through MCP",
   async ({ mcp }) => {
     const { call, root } = await prepareMcpCapture(mcp.call);

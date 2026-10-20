@@ -69,6 +69,31 @@ it("handles proto2 groups and reports mismatched or missing end groups", async (
   expect(await wire("0c")).toHaveProperty("error");
 });
 
+it("bounds group nesting while probing nested-message candidates", async () => {
+  for (const depth of [64, 65]) {
+    const payload = Buffer.concat([
+      Buffer.alloc(depth, 11),
+      Buffer.alloc(depth, 12),
+    ]);
+    const bytes = Buffer.concat([
+      Buffer.from([10, payload.length | 128, payload.length >> 7]),
+      payload,
+    ]);
+    const decoded = await decodeProtobufWire(
+      bytes,
+      0,
+      bytes.length,
+      0,
+      new ProtobufBudget(),
+      same,
+    );
+    expect(decoded.error).toBeUndefined();
+    expect(decoded.fields[0]?.interpretations?.includes("nested-message")).toBe(
+      depth === 64,
+    );
+  }
+});
+
 it("keeps empty and control-containing UTF-8 among ambiguous length-delimited readings", async () => {
   const empty = await wire("0a00");
   expect(empty.fields[0]).toMatchObject({
