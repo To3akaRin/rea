@@ -29,8 +29,12 @@ cliTest(
       // point at a real class record, so losing fixup ownership would invent
       // a local superclass even after rejecting the external bind symbol.
       bytes.writeBigUInt64LE(0x100000200n, 0x208);
-      bytes.writeUInt32LE(2, 16);
-      bytes.writeUInt32LE(200, 20);
+      bytes.writeUInt32LE(3, 16);
+      bytes.writeUInt32LE(256, 20);
+      bytes.writeUInt32LE(0xc, 232); // LC_LOAD_DYLIB declares ordinal one.
+      bytes.writeUInt32LE(56, 236);
+      bytes.writeUInt32LE(24, 240);
+      bytes.write("/usr/lib/libobjc.A.dylib\0", 256);
       bytes.writeUInt32LE(0x80000022, 184);
       bytes.writeUInt32LE(48, 188);
       const stream = Buffer.from([
